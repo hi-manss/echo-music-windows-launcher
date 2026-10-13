@@ -18,9 +18,12 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-latest
+    outputs:
+      upstream_tag: ${{ steps.upstream.outputs.tag }}
+      should_build: ${{ steps.release_check.outputs.is_new }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           fetch-depth: 0
 
@@ -48,7 +51,7 @@ jobs:
 
       - name: Install .NET SDK
         if: steps.release_check.outputs.is_new == 'true' || github.event_name == 'workflow_dispatch' || github.event_name == 'push'
-        uses: actions/setup-dotnet@v4
+        uses: actions/setup-dotnet@v6
         with:
           dotnet-version: "8.0.x"
 
@@ -57,13 +60,12 @@ jobs:
         shell: pwsh
         run: dotnet publish EchoMusicLauncher.csproj -c Release -r win-x64 --self-contained true -p:EnableWindowsTargeting=true -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -o publish
 
-      - name: Upload executable artifact
+      - name: Upload raw EXE artifact (no ZIP)
         if: steps.release_check.outputs.is_new == 'true' || github.event_name == 'workflow_dispatch' || github.event_name == 'push'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
-          name: EchoMusicLauncher-Windows-x64-${{ steps.upstream.outputs.tag }}
           path: publish/EchoMusicLauncher.exe
-          if-no-files-found: error
+          archive: false
           retention-days: 30
 
       - name: Prepare package payload
@@ -76,14 +78,14 @@ jobs:
             "Echo Music Windows Launcher",
             "Version: ${{ steps.upstream.outputs.tag }}",
             "",
-            "This is a self-provisioning Windows launcher for the Echo Music Android APK.",
-            "On first run it downloads Android command-line tools, emulator components, and a tablet system image.",
-            "It is not a native Windows desktop port; hardware virtualization and internet access are required for setup."
+            "This launcher self-provisions official Android SDK components on first run.",
+            "It runs the Echo Music Android APK inside a landscape tablet emulator; it is not a native Windows desktop port.",
+            "Internet access, free disk space, and hardware virtualization are required for first-run setup."
           ) | Set-Content package/README.txt
 
       - name: Log in to GitHub Container Registry
         if: steps.release_check.outputs.is_new == 'true' || github.event_name == 'workflow_dispatch' || github.event_name == 'push'
-        uses: docker/login-action@v3
+        uses: docker/login-action@v4
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -120,3 +122,76 @@ jobs:
           git add .last-upstream-release
           git commit -m "Record Echo Music release ${{ steps.upstream.outputs.tag }}" || Write-Host "Release marker unchanged"
           git push
+
+  publish-direct-exe:
+    needs: build
+    if: needs.build.outputs.should_build == 'true' || github.event_name == 'workflow_dispatch' || github.event_name == 'push'
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download raw EXE artifact
+        uses: actions/download-artifact@v8
+        with:
+          name: EchoMusicLauncher.exe
+          path: publish
+
+      - name: Authenticode-sign EXE when a trusted certificate is configured
+        shell: pwsh
+        env:
+          WINDOWS_SIGNING_CERT_BASE64: ${{ secrets.WINDOWS_SIGNING_CERT_BASE64 }}
+          WINDOWS_SIGNING_CERT_PASSWORD: ${{ secrets.WINDOWS_SIGNING_CERT_PASSWORD }}
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:WINDOWS_SIGNING_CERT_BASE64) -and [string]::IsNullOrWhiteSpace($env:WINDOWS_SIGNING_CERT_PASSWORD)) {
+            Write-Warning "No code-signing certificate configured. Publishing unsigned EXE; SmartScreen may warn about an unrecognized app."
+            exit 0
+          }
+          if ([string]::IsNullOrWhiteSpace($env:WINDOWS_SIGNING_CERT_BASE64) -or [string]::IsNullOrWhiteSpace($env:WINDOWS_SIGNING_CERT_PASSWORD)) {
+            throw "Both WINDOWS_SIGNING_CERT_BASE64 and WINDOWS_SIGNING_CERT_PASSWORD secrets are required to sign the executable."
+          }
+          $certPath = Join-Path $env:RUNNER_TEMP "echo-music-signing.pfx"
+          try {
+            [IO.File]::WriteAllBytes($certPath, [Convert]::FromBase64String($env:WINDOWS_SIGNING_CERT_BASE64))
+            $kitPath = Join-Path ([Environment]::GetFolderPath([Environment+SpecialFolder]::ProgramFilesX86)) "Windows Kits/10/bin"
+            $signtool = Get-ChildItem -Path $kitPath -Filter signtool.exe -Recurse -ErrorAction SilentlyContinue | Where-Object { $_.FullName -match "\\\\x64\\\\signtool\\.exe$" } | Sort-Object FullName -Descending | Select-Object -First 1
+            if ($null -eq $signtool) { throw "Windows SDK SignTool was not found on the runner." }
+            & $signtool.FullName sign /fd SHA256 /tr "http://timestamp.digicert.com" /td SHA256 /f $certPath /p $env:WINDOWS_SIGNING_CERT_PASSWORD "publish/EchoMusicLauncher.exe"
+            if ($LASTEXITCODE -ne 0) { throw "Authenticode signing failed." }
+            & $signtool.FullName verify /pa /v "publish/EchoMusicLauncher.exe"
+            if ($LASTEXITCODE -ne 0) { throw "Signature verification failed." }
+          } finally {
+            Remove-Item $certPath -Force -ErrorAction SilentlyContinue
+          }
+
+      - name: Publish standalone EXE to GitHub Releases
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          UPSTREAM_TAG: ${{ needs.build.outputs.upstream_tag }}
+        run: |
+          $releaseTag = "launcher-$env:UPSTREAM_TAG"
+          $repo = "${{ github.repository }}"
+          $headers = @{ "User-Agent" = "EchoMusicWindowsLauncher"; "Authorization" = "Bearer $env:GH_TOKEN"; "Accept" = "application/vnd.github+json"; "X-GitHub-Api-Version" = "2022-11-28" }
+          $uri = "https://api.github.com/repos/$repo/releases/tags/$([uri]::EscapeDataString($releaseTag))"
+          $existing = $null
+          try {
+            $existing = Invoke-RestMethod -Headers $headers -Uri $uri -ErrorAction Stop
+          } catch {
+            $statusCode = 0
+            try { $statusCode = [int]$_.Exception.Response.StatusCode } catch { }
+            if ($statusCode -ne 404) { throw }
+          }
+          $notes = Join-Path $env:RUNNER_TEMP "release-notes.md"
+          @(
+            "Windows launcher build for upstream Echo Music $env:UPSTREAM_TAG.",
+            "",
+            "Download EchoMusicLauncher.exe below. It bootstraps an Android tablet emulator on first run and requires internet access, disk space, and CPU virtualization.",
+            "",
+            "This is an Android emulator launcher, not a native Windows port. If the file is unsigned, Windows SmartScreen may show an unknown-app warning."
+          ) | Set-Content $notes
+          if ($null -eq $existing) {
+            gh release create $releaseTag "publish/EchoMusicLauncher.exe" --repo $repo --title "Echo Music Windows Launcher $env:UPSTREAM_TAG" --notes-file $notes
+          } else {
+            gh release upload $releaseTag "publish/EchoMusicLauncher.exe" --repo $repo --clobber
+          }
+          if ($LASTEXITCODE -ne 0) { throw "Publishing the standalone EXE release asset failed." }
