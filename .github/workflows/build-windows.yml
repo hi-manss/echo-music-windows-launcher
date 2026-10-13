@@ -3,7 +3,6 @@ name: Build Echo Music Windows Launcher
 on:
   workflow_dispatch:
   schedule:
-    # Poll upstream once per day.
     - cron: "30 3 * * *"
   push:
     branches: [main]
@@ -14,6 +13,7 @@ on:
 
 permissions:
   contents: write
+  packages: write
 
 jobs:
   build:
@@ -30,9 +30,7 @@ jobs:
         run: |
           $release = Invoke-RestMethod -Headers @{ "User-Agent" = "EchoMusicWindowsLauncher" } -Uri "https://api.github.com/repos/EchoMusicApp/Echo-Music/releases/latest"
           $tag = [string]$release.tag_name
-          if ([string]::IsNullOrWhiteSpace($tag)) {
-            throw "Could not read the latest upstream release tag."
-          }
+          if ([string]::IsNullOrWhiteSpace($tag)) { throw "Could not read latest upstream release tag." }
           "tag=$tag" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
           Write-Host "Latest upstream release: $tag"
 
@@ -41,18 +39,10 @@ jobs:
         shell: pwsh
         run: |
           $tag = "${{ steps.upstream.outputs.tag }}"
-          $marker = ".last-upstream-release"
-          $previous = ""
-          if (Test-Path $marker) {
-            $previous = (Get-Content $marker -Raw).Trim()
-          }
+          $previous = if (Test-Path ".last-upstream-release") { (Get-Content ".last-upstream-release" -Raw).Trim() } else { "" }
           $isNew = ($tag -ne $previous)
           "is_new=$($isNew.ToString().ToLowerInvariant())" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
-          if ($isNew) {
-            Write-Host "New upstream release detected: $tag"
-          } else {
-            Write-Host "Release $tag has already been built."
-          }
+          Write-Host "Release=$tag Previous=$previous New=$isNew"
 
       - name: Install .NET SDK
         if: steps.release_check.outputs.is_new == 'true' || github.event_name == 'workflow_dispatch' || github.event_name == 'push'
@@ -65,7 +55,7 @@ jobs:
         shell: pwsh
         run: dotnet publish EchoMusicLauncher.csproj -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -o publish
 
-      - name: Upload executable
+      - name: Upload executable artifact
         if: steps.release_check.outputs.is_new == 'true' || github.event_name == 'workflow_dispatch' || github.event_name == 'push'
         uses: actions/upload-artifact@v4
         with:
@@ -73,6 +63,47 @@ jobs:
           path: publish/EchoMusicLauncher.exe
           if-no-files-found: error
           retention-days: 30
+
+      - name: Prepare package payload
+        if: steps.release_check.outputs.is_new == 'true' || github.event_name == 'workflow_dispatch' || github.event_name == 'push'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path package | Out-Null
+          Copy-Item publish/EchoMusicLauncher.exe package/EchoMusicLauncher.exe
+          @(
+            "Echo Music Windows Launcher",
+            "Version: ${{ steps.upstream.outputs.tag }}",
+            "",
+            "This is a Windows launcher for the Echo Music Android APK.",
+            "It requires an Android runtime/emulator and ADB; it is not a native desktop port."
+          ) | Set-Content package/README.txt
+
+      - name: Log in to GitHub Container Registry
+        if: steps.release_check.outputs.is_new == 'true' || github.event_name == 'workflow_dispatch' || github.event_name == 'push'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Create package image and publish to GitHub Packages
+        if: steps.release_check.outputs.is_new == 'true' || github.event_name == 'workflow_dispatch' || github.event_name == 'push'
+        shell: pwsh
+        env:
+          GHCR_OWNER: ${{ github.repository_owner }}
+          UPSTREAM_TAG: ${{ steps.upstream.outputs.tag }}
+        run: |
+          @(
+            "FROM scratch",
+            "LABEL org.opencontainers.image.title=""Echo Music Windows Launcher""",
+            "LABEL org.opencontainers.image.version=""$env:UPSTREAM_TAG""",
+            "COPY EchoMusicLauncher.exe /EchoMusicLauncher.exe",
+            "COPY README.txt /README.txt"
+          ) | Set-Content -Encoding ascii package/Dockerfile
+          docker build -f package/Dockerfile -t "ghcr.io/$($env:GHCR_OWNER.ToLower())/echo-music-windows-launcher:$env:UPSTREAM_TAG" package
+          docker push "ghcr.io/$($env:GHCR_OWNER.ToLower())/echo-music-windows-launcher:$env:UPSTREAM_TAG"
+          docker tag "ghcr.io/$($env:GHCR_OWNER.ToLower())/echo-music-windows-launcher:$env:UPSTREAM_TAG" "ghcr.io/$($env:GHCR_OWNER.ToLower())/echo-music-windows-launcher:latest"
+          docker push "ghcr.io/$($env:GHCR_OWNER.ToLower())/echo-music-windows-launcher:latest"
 
       - name: Record latest upstream release
         if: steps.release_check.outputs.is_new == 'true' || github.event_name == 'workflow_dispatch' || github.event_name == 'push'
