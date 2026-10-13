@@ -3,7 +3,7 @@ name: Build Echo Music Windows Launcher
 on:
   workflow_dispatch:
   schedule:
-    # Check for a new upstream stable release every day at 03:30 UTC.
+    # Poll upstream once per day.
     - cron: "30 3 * * *"
   push:
     branches: [main]
@@ -13,69 +13,74 @@ on:
       - ".github/workflows/build-windows.yml"
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
-  check-upstream:
-    runs-on: ubuntu-latest
-    outputs:
-      release_tag: ${{ steps.release.outputs.tag }}
-      is_new: ${{ steps.release.outputs.is_new }}
-    steps:
-      - name: Check latest upstream release
-        id: release
-        shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          tag="$(curl -fsSL -H "Accept: application/vnd.github+json" \
-            https://api.github.com/repos/EchoMusicApp/Echo-Music/releases/latest \
-            | python -c 'import json,sys; print(json.load(sys.stdin)["tag_name"])')"
-          echo "tag=$tag" >> "$GITHUB_OUTPUT"
-
-          if [ -f .last-upstream-release ]; then
-            previous="$(cat .last-upstream-release)"
-          else
-            previous=""
-          fi
-
-          if [ "$tag" != "$previous" ]; then
-            echo "is_new=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "is_new=false" >> "$GITHUB_OUTPUT"
-          fi
-
-          echo "Latest upstream tag: $tag; previously recorded: ${previous:-none}"
-
-      - name: Checkout launcher repository
-        if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
-        uses: actions/checkout@v4
-
   build:
     runs-on: windows-latest
-    needs: check-upstream
-    # Build on manual runs and code pushes; scheduled runs only build when
-    # the upstream release tag changes. The prior tag is not persisted yet,
-    # so scheduled runs act as a daily build until state persistence is added.
-    if: always() && needs.check-upstream.result == 'success'
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Get latest upstream release
+        id: upstream
+        shell: pwsh
+        run: |
+          $release = Invoke-RestMethod -Headers @{ "User-Agent" = "EchoMusicWindowsLauncher" } -Uri "https://api.github.com/repos/EchoMusicApp/Echo-Music/releases/latest"
+          $tag = [string]$release.tag_name
+          if ([string]::IsNullOrWhiteSpace($tag)) {
+            throw "Could not read the latest upstream release tag."
+          }
+          "tag=$tag" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          Write-Host "Latest upstream release: $tag"
+
+      - name: Skip if this release was already built
+        id: release_check
+        shell: pwsh
+        run: |
+          $tag = "${{ steps.upstream.outputs.tag }}"
+          $marker = ".last-upstream-release"
+          $previous = ""
+          if (Test-Path $marker) {
+            $previous = (Get-Content $marker -Raw).Trim()
+          }
+          $isNew = ($tag -ne $previous)
+          "is_new=$($isNew.ToString().ToLowerInvariant())" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          if ($isNew) {
+            Write-Host "New upstream release detected: $tag"
+          } else {
+            Write-Host "Release $tag has already been built."
+          }
 
       - name: Install .NET SDK
+        if: steps.release_check.outputs.is_new == 'true' || github.event_name == 'workflow_dispatch' || github.event_name == 'push'
         uses: actions/setup-dotnet@v4
         with:
           dotnet-version: "8.0.x"
 
       - name: Publish single-file Windows executable
+        if: steps.release_check.outputs.is_new == 'true' || github.event_name == 'workflow_dispatch' || github.event_name == 'push'
         shell: pwsh
         run: dotnet publish EchoMusicLauncher.csproj -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -o publish
 
       - name: Upload executable
+        if: steps.release_check.outputs.is_new == 'true' || github.event_name == 'workflow_dispatch' || github.event_name == 'push'
         uses: actions/upload-artifact@v4
         with:
-          name: EchoMusicLauncher-Windows-x64
+          name: EchoMusicLauncher-Windows-x64-${{ steps.upstream.outputs.tag }}
           path: publish/EchoMusicLauncher.exe
           if-no-files-found: error
           retention-days: 30
+
+      - name: Record latest upstream release
+        if: steps.release_check.outputs.is_new == 'true' || github.event_name == 'workflow_dispatch' || github.event_name == 'push'
+        shell: pwsh
+        run: |
+          Set-Content -Path ".last-upstream-release" -Value "${{ steps.upstream.outputs.tag }}" -NoNewline
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add .last-upstream-release
+          git commit -m "Record Echo Music release ${{ steps.upstream.outputs.tag }}" || Write-Host "Release marker unchanged"
+          git push
