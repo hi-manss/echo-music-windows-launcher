@@ -1,31 +1,32 @@
 # Echo Music Windows Launcher (experimental)
 
-This project packages a Windows `.exe` launcher that downloads the latest APK asset from the official Echo Music GitHub release, installs/updates it using Android Debug Bridge (ADB), and asks Android to launch it.
+This repository creates a single-file Windows launcher for the Android edition of Echo Music.
+
+## User experience
+
+- Run `EchoMusicLauncher.exe`; you do not need to install Android Studio, BlueStacks, or ADB manually.
+- On first run, the launcher asks you to review and accept the Android SDK license terms, then downloads and configures the official Android command-line tools, emulator, ADB, Java (only if a usable Java 17+ runtime isn't already installed), and an Android tablet system image.
+- First-run setup requires internet access and several GB of free disk space (typically around 2–3 GB of downloads). The Android emulator also requires hardware virtualization support to be enabled.
+- The launcher downloads the latest official Echo Music APK, creates a landscape tablet virtual device (1920 × 1200 at 240 dpi), scales the emulator window to fit the available desktop screen, installs/updates Echo Music, and launches it.
+- SDK files and the virtual device are saved under the current Windows user's Local AppData and reused on later launches.
 
 ## Important limitations
 
-- This is **not a native Windows port** of Echo Music.
-- An Android runtime/emulator (for example, BlueStacks) must already be installed and running.
-- ADB must be enabled and the emulator/device must be visible to ADB.
-- The launcher does not bundle Android or the APK. It downloads the latest APK at runtime from the official GitHub release.
-- The current implementation expects the official release to publish an APK asset and uses package ID `echo.music.iad1tya`.
+- This is an Android app running inside an automatically provisioned emulator, not a native Windows desktop port.
+- The EXE includes the self-contained .NET launcher. Android's official emulator/system-image downloads are fetched on first run instead of bundling multiple GB of third-party SDK files into the EXE.
+- Hardware virtualization must be enabled. If the emulator exits before starting, check BIOS/UEFI virtualization and Windows hypervisor support.
+- The launcher currently uses package ID `echo.music.iad1tya` and the latest APK asset from the official [Echo Music releases](https://github.com/EchoMusicApp/Echo-Music/releases).
 
-## Build the EXE on GitHub
+## Build the EXE with GitHub Actions
 
-1. Create a GitHub repository and upload these files to its `main` branch.
-2. Open **Actions** and choose **Build Echo Music Windows Launcher**.
-3. Click **Run workflow**.
-4. When it completes, open the run and download the `EchoMusicLauncher-Windows-x64` artifact. Extract it to get `EchoMusicLauncher.exe`.
+1. Open the repository's **Actions** tab.
+2. Run **Build Echo Music Windows Launcher**, or push a change to the launcher source.
+3. Download `EchoMusicLauncher-Windows-x64-<upstream-tag>` from the workflow run's **Artifacts** section.
 
-## Run
+The workflow also publishes a GHCR package to [GitHub Packages](https://github.com/users/hi-manss/packages).
 
-1. Install and start an Android runtime/emulator.
-2. Enable its ADB access.
-3. Ensure `adb.exe` is on PATH, or connect the runtime using its own ADB tool.
-4. Run `EchoMusicLauncher.exe`.
+## License and downloads
 
-For BlueStacks, the ADB address/port varies by configuration. If necessary, run `adb connect 127.0.0.1:5555` in PowerShell, replacing the port with the one configured by your emulator.
+The first-run dialog links to the [Android SDK License Agreement](https://developer.android.com/studio/terms). Review it and check the acceptance box before allowing the launcher to download SDK components. Android command-line tools are downloaded from Google's official distribution and SHA-256 checked before extraction.
 
-## Security note
-
-The launcher downloads and installs the APK from the official `EchoMusicApp/Echo-Music` GitHub release. Review the source before running it.
+The Java fallback is downloaded from the Eclipse Adoptium API over HTTPS if the system has no usable Java 17+ runtime.
