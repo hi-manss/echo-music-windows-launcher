@@ -2,19 +2,63 @@ name: Build Echo Music Windows Launcher
 
 on:
   workflow_dispatch:
+  schedule:
+    # Check for a new upstream stable release every day at 03:30 UTC.
+    - cron: "30 3 * * *"
   push:
     branches: [main]
     paths:
-      - '**.cs'
-      - '**.csproj'
-      - '.github/workflows/build-windows.yml'
+      - "**.cs"
+      - "**.csproj"
+      - ".github/workflows/build-windows.yml"
 
 permissions:
   contents: read
 
 jobs:
+  check-upstream:
+    runs-on: ubuntu-latest
+    outputs:
+      release_tag: ${{ steps.release.outputs.tag }}
+      is_new: ${{ steps.release.outputs.is_new }}
+    steps:
+      - name: Check latest upstream release
+        id: release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag="$(curl -fsSL -H "Accept: application/vnd.github+json" \
+            https://api.github.com/repos/EchoMusicApp/Echo-Music/releases/latest \
+            | python -c 'import json,sys; print(json.load(sys.stdin)["tag_name"])')"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
+          if [ -f .last-upstream-release ]; then
+            previous="$(cat .last-upstream-release)"
+          else
+            previous=""
+          fi
+
+          if [ "$tag" != "$previous" ]; then
+            echo "is_new=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "is_new=false" >> "$GITHUB_OUTPUT"
+          fi
+
+          echo "Latest upstream tag: $tag; previously recorded: ${previous:-none}"
+
+      - name: Checkout launcher repository
+        if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+        uses: actions/checkout@v4
+
   build:
     runs-on: windows-latest
+    needs: check-upstream
+    # Build on manual runs and code pushes; scheduled runs only build when
+    # the upstream release tag changes. The prior tag is not persisted yet,
+    # so scheduled runs act as a daily build until state persistence is added.
+    if: always() && needs.check-upstream.result == 'success'
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -22,9 +66,10 @@ jobs:
       - name: Install .NET SDK
         uses: actions/setup-dotnet@v4
         with:
-          dotnet-version: '8.0.x'
+          dotnet-version: "8.0.x"
 
       - name: Publish single-file Windows executable
+        shell: pwsh
         run: dotnet publish EchoMusicLauncher.csproj -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -o publish
 
       - name: Upload executable
