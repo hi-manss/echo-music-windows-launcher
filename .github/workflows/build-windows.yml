@@ -1,0 +1,36 @@
+name: Build Echo Music Windows Launcher
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - '**.cs'
+      - '**.csproj'
+      - '.github/workflows/build-windows.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install .NET SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Publish single-file Windows executable
+        run: dotnet publish EchoMusicLauncher.csproj -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -o publish
+
+      - name: Upload executable
+        uses: actions/upload-artifact@v4
+        with:
+          name: EchoMusicLauncher-Windows-x64
+          path: publish/EchoMusicLauncher.exe
+          if-no-files-found: error
+          retention-days: 30
