@@ -120,8 +120,16 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add .last-upstream-release
-          git commit -m "Record Echo Music release ${{ steps.upstream.outputs.tag }}" || Write-Host "Release marker unchanged"
-          git push
+          git diff --cached --quiet
+          if ($LASTEXITCODE -ne 0) {
+            git commit -m "Record Echo Music release ${{ steps.upstream.outputs.tag }}"
+            git pull --rebase origin main
+            if ($LASTEXITCODE -ne 0) { throw "Could not rebase the release marker commit onto main." }
+            git push
+            if ($LASTEXITCODE -ne 0) { throw "Could not push the release marker update." }
+          } else {
+            Write-Host "Release marker unchanged; no Git push needed."
+          }
 
   publish-direct-exe:
     needs: build
