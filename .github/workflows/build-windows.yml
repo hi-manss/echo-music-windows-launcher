@@ -17,7 +17,7 @@ permissions:
 
 jobs:
   build:
-    runs-on: windows-latest
+    runs-on: ubuntu-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -77,13 +77,6 @@ jobs:
             "This is a Windows launcher for the Echo Music Android APK.",
             "It requires an Android runtime/emulator and ADB; it is not a native desktop port."
           ) | Set-Content package/README.txt
-
-      - name: Switch Docker to Linux containers
-        if: steps.release_check.outputs.is_new == 'true' || github.event_name == 'workflow_dispatch' || github.event_name == 'push'
-        shell: pwsh
-        run: |
-          # The GHCR OCI image uses FROM scratch, which requires Linux containers.
-          docker info --format '{{.OSType}}'
 
       - name: Log in to GitHub Container Registry
         if: steps.release_check.outputs.is_new == 'true' || github.event_name == 'workflow_dispatch' || github.event_name == 'push'
